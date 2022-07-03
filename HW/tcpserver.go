@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -53,6 +54,7 @@ type Robot struct {
 	previouslocation Point
 	currentlocation  Point
 	orientation      Point
+	isrecharging     bool
 }
 
 func (arobot Robot) evade(someconnection net.Conn) Robot {
@@ -78,8 +80,7 @@ func (arobot *Robot) turnright(someconnection net.Conn) Robot {
 
 	scanner := bufio.NewScanner(someconnection)
 	scanner.Split(ScanLines)
-	scanner.Scan()
-	buff1 := scanner.Bytes()
+	buff1, _, _ := readMessage(someconnection, *scanner)
 	fmt.Printf("Location returned during right turn was %s\n", buff1)
 
 	arobot.orientation = turningright[arobot.orientation]
@@ -97,8 +98,7 @@ func (arobot *Robot) turnleft(someconnection net.Conn) Robot {
 
 	scanner := bufio.NewScanner(someconnection)
 	scanner.Split(ScanLines)
-	scanner.Scan()
-	buff1 := scanner.Bytes()
+	buff1, _, _ := readMessage(someconnection, *scanner)
 	fmt.Printf("Location returned during left turn was %s\n", buff1)
 
 	arobot.orientation = turningleft[arobot.orientation]
@@ -108,6 +108,7 @@ func (arobot *Robot) turnleft(someconnection net.Conn) Robot {
 
 func (arobot *Robot) moveforward(someconnection net.Conn) {
 	fmt.Printf("Moving\n")
+
 	_, err := io.WriteString(someconnection, servermove)
 
 	if err != nil {
@@ -116,8 +117,7 @@ func (arobot *Robot) moveforward(someconnection net.Conn) {
 
 	scanner := bufio.NewScanner(someconnection)
 	scanner.Split(ScanLines)
-	scanner.Scan()
-	buff1 := scanner.Bytes()
+	buff1, _, _ := readMessage(someconnection, *scanner)
 	arobot.previouslocation = arobot.currentlocation
 	arobot.currentlocation.x, arobot.currentlocation.y, _ = getcoordinates(buff1, arobot.currentlocation.x, arobot.currentlocation.y)
 	*arobot = CalculateOrientation(*arobot)
@@ -152,6 +152,7 @@ const (
 	maxlengthforclientname    = 18
 	maxlengthforkeyid         = 5
 	timeout                   = 2 * time.Second
+	timeoutforcharge          = 5 * time.Second
 	maxclientconfirmlength    = 7
 	maxclientoklength         = 12
 	maxclientrecharginglength = 12
@@ -178,6 +179,9 @@ const (
 	controlrelatederror       = "Control related error"
 	successful                = "Suscessful logout"
 )
+
+//Initialize our local robot
+var Dobbytherobot Robot
 
 func main() {
 	listener, err := net.Listen("tcp", "localhost:8000")
@@ -234,9 +238,6 @@ func handleConn(someconnection net.Conn) {
 		}
 	}
 
-	//Initialize our local robot
-	var Dobbytherobot Robot
-
 	//Start the control of our robot
 	command = control(someconnection, scanner, Dobbytherobot)
 	if command == controlrelatederror {
@@ -256,6 +257,14 @@ func handleConn(someconnection net.Conn) {
 		return
 	} else if command == successful {
 		fmt.Printf("Successfully logged out\n")
+		someconnection.Close()
+		return
+	} else if command == serverlogicerror {
+		fmt.Printf("There was a server logic error\n")
+		_, err := io.WriteString(someconnection, serverlogicerror)
+		if err != nil {
+			log.Print(err)
+		}
 		someconnection.Close()
 		return
 	}
@@ -351,6 +360,9 @@ func control(someconnection net.Conn, scanner bufio.Scanner, arobot Robot) strin
 	if errormessage == serversyntaxerror {
 		return serversyntaxerror
 	}
+	if errormessage == serverlogicerror {
+		return serverlogicerror
+	}
 
 	successful := logout(someconnection)
 
@@ -361,16 +373,12 @@ func getusername(someconnection net.Conn) (string, string, bufio.Scanner) {
 	var errormessage string
 	var username string
 
-	//Get the username
-	scanner := bufio.NewScanner(someconnection)
-	scanner.Split(ScanLines)
-	scanner.Scan()
-	username = scanner.Text()
-	err := scanner.Err()
+	scanner1 := bufio.NewScanner(someconnection)
+	scanner1.Split(ScanLines)
 
-	if err != nil {
-		fmt.Printf("There's a  %s error", err)
-	}
+	//Get the username
+	bytemessage, errormessage, scanner := readMessage(someconnection, *scanner1)
+	username = string(bytemessage)
 
 	fmt.Printf("\nThe length of the username is: %d\n", len(username))
 
@@ -385,7 +393,7 @@ func getusername(someconnection net.Conn) (string, string, bufio.Scanner) {
 	fmt.Printf("The byte form of the username is :\n")
 	fmt.Println(byteform)
 
-	return username, errormessage, *scanner
+	return username, errormessage, scanner
 }
 
 func requestkey(someconnection net.Conn) {
@@ -399,12 +407,7 @@ func requestkey(someconnection net.Conn) {
 func getkeyID(someconnection net.Conn, scanner bufio.Scanner) (int, string, bufio.Scanner) {
 	//Hash
 	var error string
-	scanner.Scan()
-	buff1 := scanner.Bytes()
-	err := scanner.Err()
-	if err != nil {
-		fmt.Printf("There's a  %s error", err)
-	}
+	buff1, error, scanner := readMessage(someconnection, scanner)
 
 	id, err := strconv.Atoi(strings.Trim(string(buff1), "\b"))
 	fmt.Printf("Our id is %s\n", buff1)
@@ -413,7 +416,6 @@ func getkeyID(someconnection net.Conn, scanner bufio.Scanner) (int, string, bufi
 		fmt.Printf("The key %s is not a number\n", buff1)
 		_, err = io.WriteString(someconnection, serversyntaxerror)
 		error = serversyntaxerror
-
 	}
 
 	if id > 4 || id < 0 || unicode.IsNumber(rune(id)) {
@@ -526,6 +528,13 @@ func identifyposition(someconnection net.Conn, arobot Robot, scanner bufio.Scann
 	//See if the coordinate syntax is right
 	scanner.Scan()
 	buff1 := scanner.Bytes()
+	err = scanner.Err()
+	if err != nil {
+		errorstring = serversyntaxerror
+		fmt.Printf("There's a  %s error", err)
+		return arobot, errorstring
+	}
+
 	location := strings.TrimPrefix(string(buff1)+suffix, "\b")
 	validmove := regexp.MustCompile(`OK [-0-9]+ [-0-9]+` + suffix)
 
@@ -650,12 +659,17 @@ func getmessage(someconnection net.Conn) string {
 	if err != nil {
 		fmt.Printf("Couldn't send request to client")
 	}
+	scanner := bufio.NewScanner(someconnection)
+	scanner.Split(ScanLines)
 
-	buff1 := make([]byte, maxclientmessagelength)
-	someconnection.Read(buff1)
+	buff1, errormessage, _ := readMessage(someconnection, *scanner)
 	message := strings.Trim(string(buff1), "\x00")
-	if len(message) >= 100 {
+	fmt.Printf("The length of the message is %d\n", len(message))
+	if len(message) == 0 {
 		return serversyntaxerror
+	}
+	if errormessage == serverlogicerror {
+		return serverlogicerror
 	}
 	fmt.Printf("%s\n", message)
 
@@ -711,19 +725,29 @@ func getcoordinates(buff1 []byte, x int64, y int64) (int64, int64, string) {
 }
 
 func ScanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	var lengthexceed = errors.New("Length Exceeded")
+	validmove := regexp.MustCompile(`OK [-0-9]+ *`)
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil
 	}
-
 	if i := bytes.Index(data, []byte{'\a', '\b'}); i >= 0 {
-		// We have a full newline-terminated line.
 		return i + 1, dropend(data[0:i]), nil
+	}
+	if len(data) >= 100 {
+		return len(data), dropend(data), lengthexceed
+	}
+	if len(data) >= 20 {
+		return len(data), dropend(data), lengthexceed
+	}
+	if validmove.MatchString(string(data)) {
+		if len(data) >= maxclientoklength {
+			return len(data), dropend(data), lengthexceed
+		}
 	}
 
 	if atEOF {
 		return len(data), dropend(data), nil
 	}
-	// Request more data.
 	return 0, nil, nil
 }
 
@@ -732,4 +756,63 @@ func dropend(data []byte) []byte {
 		return data[0 : len(data)-1]
 	}
 	return data
+}
+
+func readMessage(someconnection net.Conn, scanner bufio.Scanner) ([]byte, string, bufio.Scanner) {
+	var message []byte
+	var errormessage string
+	scanner.Scan()
+	message = scanner.Bytes()
+	message = bytes.TrimPrefix(message, []byte("\b"))
+
+	err := scanner.Err()
+
+	fmt.Printf("Message received is %s\n", message)
+
+	if err != nil {
+		errormessage = serversyntaxerror
+		fmt.Printf("There's a server syntax error\n")
+		return message, errormessage, scanner
+	}
+	if Dobbytherobot.isrecharging == false && string(message)+suffix == clientfullpower {
+		errormessage = serverlogicerror
+		fmt.Printf("There's a  server logic error\n")
+		return message, errormessage, scanner
+	}
+
+	if string(message)+suffix == clientrecharging {
+		fmt.Printf("Setting deadline\n")
+		err := someconnection.SetDeadline(time.Now().Add(timeoutforcharge))
+		if err != nil {
+			fmt.Printf("Error occured setting deadline\n")
+		}
+		fmt.Printf("Setting timeout\n")
+
+		Dobbytherobot.isrecharging = true
+		scanner.Scan()
+		if scanner.Err() != nil {
+			timeouterror := scanner.Err().(net.Error).Timeout()
+			fmt.Printf("Error should show here\n")
+			if timeouterror {
+				errormessage = serversyntaxerror
+				return message, errormessage, scanner
+			}
+		}
+		err = someconnection.SetDeadline(time.Time{})
+		message = scanner.Bytes()
+		message = bytes.TrimPrefix(message, []byte("\b"))
+
+		if string(message)+suffix != clientfullpower {
+			errormessage = serverlogicerror
+			fmt.Printf("There's a  %s error.Client sent %s\n", errormessage, string(message))
+			return message, errormessage, scanner
+		}
+
+		Dobbytherobot.isrecharging = false
+		scanner.Scan()
+		message = scanner.Bytes()
+		message = bytes.TrimPrefix(message, []byte("\b"))
+		return message, errormessage, scanner
+	}
+	return message, errormessage, scanner
 }
