@@ -15,17 +15,30 @@ import (
 	"unicode"
 )
 
+////////////////////////////////////
+// Authentication related types. //
+//////////////////////////////////
+
 type serverclientkeypair struct {
 	ClientID int
 	ServerID int
 }
+
+//////////////////////////////////////////////////////////
+// Orientation related types,functions and structures. //
+////////////////////////////////////////////////////////
+
+var North Point = Point{0, 1}
+var East Point = Point{1, 0}
+var West Point = Point{-1, 0}
+var South Point = Point{0, -1}
+var Zeropoint = Point{0, 0}
 
 type Point struct {
 	x int64
 	y int64
 }
 
-//Maneuvering maps
 var turningleft = map[Point]Point{
 	North:   West,
 	West:    South,
@@ -49,6 +62,24 @@ var orientationsinwords = map[Point]string{
 	South:       "South",
 	Point{0, 0}: "Undefined",
 }
+
+func EqualPoints(somepointa Point, somepointb Point) bool {
+	if somepointa.x == somepointb.x && somepointa.y == somepointb.y {
+		fmt.Printf("The positions/directions are equal\n")
+		return true
+	}
+	return false
+}
+
+func CalculateOrientation(robot Robot) Robot {
+	robot.orientation = Point{robot.currentlocation.x - robot.previouslocation.x, robot.currentlocation.y - robot.previouslocation.y}
+	fmt.Printf("Our new orientation is directionx = %d, and directiony = %d\n", robot.orientation.x, robot.orientation.y)
+	return robot
+}
+
+//////////////////////////////////////////////////////////
+// Navigation related types, functions, and structures. //
+//////////////////////////////////////////////////////////
 
 type Robot struct {
 	previouslocation Point
@@ -126,28 +157,10 @@ func (arobot *Robot) moveforward(someconnection net.Conn) {
 	return
 }
 
-func EqualPoints(somepointa Point, somepointb Point) bool {
-	if somepointa.x == somepointb.x && somepointa.y == somepointb.y {
-		fmt.Printf("The positions/directions are equal\n")
-		return true
-	}
-	return false
-}
+///////////////
+// Constants //
+///////////////
 
-func CalculateOrientation(robot Robot) Robot {
-	robot.orientation = Point{robot.currentlocation.x - robot.previouslocation.x, robot.currentlocation.y - robot.previouslocation.y}
-	fmt.Printf("Our new orientation is directionx = %d, and directiony = %d\n", robot.orientation.x, robot.orientation.y)
-	return robot
-}
-
-//Orientations
-var North Point = Point{0, 1}
-var East Point = Point{1, 0}
-var West Point = Point{-1, 0}
-var South Point = Point{0, -1}
-var Zeropoint = Point{0, 0}
-
-//Constants
 const (
 	maxlengthforclientname    = 18
 	maxlengthforkeyid         = 5
@@ -180,7 +193,6 @@ const (
 	successful                = "Suscessful logout"
 )
 
-//Initialize our local robot
 var Dobbytherobot Robot
 
 func main() {
@@ -195,11 +207,10 @@ func main() {
 		}
 		go handleConn(conn)
 	}
-
 }
 
 func handleConn(someconnection net.Conn) {
-	//Handle authentication
+
 	command, scanner := authentication(someconnection)
 
 	if command == serverloginfailed {
@@ -238,7 +249,6 @@ func handleConn(someconnection net.Conn) {
 		}
 	}
 
-	//Start the control of our robot
 	command = control(someconnection, scanner, Dobbytherobot)
 	if command == controlrelatederror {
 		fmt.Printf("Something went wrong moving our robot\n")
@@ -272,7 +282,6 @@ func handleConn(someconnection net.Conn) {
 }
 
 func authentication(someconnection net.Conn) (string, bufio.Scanner) {
-	//Definining map that stores keypair values
 	var idzero serverclientkeypair
 	var idone serverclientkeypair
 	var idtwo serverclientkeypair
@@ -299,16 +308,13 @@ func authentication(someconnection net.Conn) (string, bufio.Scanner) {
 		"4": idfour,
 	}
 
-	//Acquire the username
 	username, error, scanner := getusername(someconnection)
 	if error == serversyntaxerror {
 		return serversyntaxerror, scanner
 	}
 
-	//Send request for client key
 	requestkey(someconnection)
 
-	//Acquire key
 	id, error, scanner := getkeyID(someconnection, scanner)
 	if error == serversyntaxerror || error == serverkeyoutofrange {
 		return keyrelatederror, scanner
@@ -318,10 +324,8 @@ func authentication(someconnection net.Conn) (string, bufio.Scanner) {
 	serverkeyID := keyIDtable[strconv.Itoa(id)].ServerID
 	clientkeyID := keyIDtable[strconv.Itoa(id)].ClientID
 
-	//Send Server Confirmation
 	hash := sendserverconfirm(id, serverkeyID, someconnection, username)
 
-	//Receive Client confirmation
 	hash2, hashedconfirm, errormessage, scanner := getclientconfirm(someconnection, clientkeyID, hash, scanner)
 	if errormessage == serversyntaxerror {
 		return serversyntaxerror, scanner
@@ -329,19 +333,16 @@ func authentication(someconnection net.Conn) (string, bufio.Scanner) {
 
 	fmt.Printf("Our hash 2 is %d, and our hashedconfirm is %d", hash2, hashedconfirm)
 
-	//Check if login is permitted
 	command := login(someconnection, hash2, hashedconfirm)
 	return command, scanner
 }
 
 func control(someconnection net.Conn, scanner bufio.Scanner, arobot Robot) string {
-	//Variables to monitor where we are
 	arobot.currentlocation = Point{0, 0}
 	arobot.previouslocation = Point{0, 0}
 	arobot.orientation = Point{0, 0}
 	var errorstring string
 
-	//Identify our position
 	arobot, errorstring = identifyposition(someconnection, arobot, scanner)
 	if errorstring == serversyntaxerror {
 		return errorstring
@@ -349,13 +350,11 @@ func control(someconnection net.Conn, scanner bufio.Scanner, arobot Robot) strin
 
 	fmt.Printf("Our starting x position is %v, and our starting y position is %v \n", arobot.currentlocation.x, arobot.currentlocation.y)
 
-	//Move towards target position
 	errorstring = guidetodestination(someconnection, arobot)
 	if errorstring == serversyntaxerror {
 		return controlrelatederror
 	}
 
-	//Get message
 	errormessage := getmessage(someconnection)
 	if errormessage == serversyntaxerror {
 		return serversyntaxerror
