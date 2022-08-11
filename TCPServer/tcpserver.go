@@ -195,6 +195,10 @@ const (
 
 var Dobbytherobot Robot
 
+///////////////////////////////////
+// Connection oriented functions //
+///////////////////////////////////
+
 func main() {
 	listener, err := net.Listen("tcp", "localhost:8000")
 	if err != nil {
